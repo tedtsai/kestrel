@@ -70,6 +70,7 @@ class Journal(queuePath: PersistentStreamContainer, queueName: String, syncPerio
   private var replayer: Option[PersistentStreamReader] = None
   private var replayerFilename: Option[String] = None
 
+  // 队列文件
   private def queueFile = getStream(queueName)
 
   // TODO: This should eventually be removed
@@ -136,13 +137,21 @@ class Journal(queuePath: PersistentStreamContainer, queueName: String, syncPerio
     queuePath.uniqueStreamName(queueName, infix, suffix)
   }
 
+  /**
+    * 滚日志文件
+    * @param reservedItems
+    * @param setCheckpoint
+    * @return
+    */
   def rotate(reservedItems: Seq[QItem], setCheckpoint: Boolean): Option[Checkpoint] = {
     writer.close()
+    // 临时文件 queueName.inMilliseconds
     val rotatedFile = uniqueFile(".")
+    // 将当前queueName文件更名为 临时文件
     queuePath.renameStream(queueName, rotatedFile)
     size = 0
     calculateArchiveSize()
-    open()
+    open()  // 打开queueName新文件
 
     if (readerFilename == Some(queueName)) {
       readerFilename = Some(rotatedFile)
@@ -160,16 +169,17 @@ class Journal(queuePath: PersistentStreamContainer, queueName: String, syncPerio
 
   // Directly invoked only by tests
   def rewrite(reservedItems: Seq[QItem], queue: Iterable[QItem], failPoint: Failpoint) {
-    writer.close()
-    val tempFile = uniqueFile("~~")
-    open(getStream(tempFile))
-    dump(reservedItems, queue)
-    writer.close()
+    writer.close()                     // 关闭当前文件
+    val tempFile = uniqueFile("~~")     //新建临时文件 queueName~~inMilliseconds
+    open(getStream(tempFile))           //打开新的writer
+    dump(reservedItems, queue)          //写入保留的记录
+    writer.close()                      //关闭临时文件的writer
 
     if (Failpoint.RewriteFPBeforePack == failPoint) return
 
+    // 生成 pack 文件  临时文件 queueName.inMilliseconds.pack
     val packFile = uniqueFile(".", ".pack")
-    queuePath.renameStream(tempFile, packFile)
+    queuePath.renameStream(tempFile, packFile)  //更名临时文件
 
     // cleanup the .pack file:
     val files = Journal.archivedFilesForQueue(queuePath, queueName)
@@ -186,6 +196,7 @@ class Journal(queuePath: PersistentStreamContainer, queueName: String, syncPerio
 
     if (Failpoint.RewriteFPAfterDelete == failPoint) return
 
+    //将.pack文件 更名为queueName
     queuePath.renameStream(files(0), queueName)
     calculateArchiveSize()
     open()
@@ -673,11 +684,13 @@ object Journal {
   }
 
   /**
+    * .pack 是 在rewrite生成
+    * 清除 .pack文件
    * A .pack file is atomically moved into place only after it contains a summary of the contents
    * of every journal file with a lesser-or-equal timestamp. If we find such a file, it's safe and
    * race-free to erase the older files and move the .pack file into place.
    */
-  private def cleanUpPackedFiles(path: PersistentStreamContainer, files: List[(String, Long)]): Boolean = {
+  private def  cleanUpPackedFiles(path: PersistentStreamContainer, files: List[(String, Long)]): Boolean = {
     val packFile = files.find { case (filename, timestamp) =>
       filename endsWith ".pack"
     }
@@ -699,6 +712,8 @@ object Journal {
   }
 
   /**
+    * archive file 文件格式 ：queueName + "." + timestamp
+    * 当前日志文件是         ： queueName
    * Find all the archived (non-current) journal files for a queue, sort them in replay order (by
    * timestamp), and erase the remains of any unfinished business that we find along the way.
    */
@@ -709,6 +724,8 @@ object Journal {
       // directory is gone.
       Nil
     } else {
+      // archive file 文件格式：queueName + "." + timestamp
+      // 过滤 queueName + "."的文件，按 timestamp排序
       val timedFiles = totalFiles.filter {
         _.startsWith(queueName + ".")
       }.map { filename =>
@@ -717,6 +734,7 @@ object Journal {
         timestamp
       }.toList
 
+      // 清除 除了 .pack以外的文件
       if (cleanUpPackedFiles(path, timedFiles)) {
         // probably only recurses once ever.
         archivedFilesForQueue(path, queueName)

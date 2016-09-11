@@ -101,7 +101,7 @@ class PeriodicSyncStorage(writer: FileChannel, scheduler: ScheduledExecutorServi
     do {
       writer.write(buffer)
     } while (buffer.position < buffer.limit)
-    if (period == 0.seconds) {
+    if (period == 0.seconds) {           // flush间隔 0，写完后立即flush同步到磁盘
       try {
         writer.force(false)
         DONE
@@ -109,10 +109,10 @@ class PeriodicSyncStorage(writer: FileChannel, scheduler: ScheduledExecutorServi
         case e: IOException =>
           Future.exception(e)
       }
-    } else if (period == Duration.Top) {
+    } else if (period == Duration.Top) {      // 最大间隔，永远不会flush
       // not fsync'ing.
       DONE
-    } else {
+    } else {                                 //其他情况，开始后台flush线程
       val promise = new Promise[Unit]()
       promises.add(TimestampedPromise(promise, Time.now))
       periodicSyncTask.start()

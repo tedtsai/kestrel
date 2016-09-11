@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicLong
 import scala.collection.mutable
 import scala.collection.JavaConversions._
 
+// 待久化队列
 class PersistentQueue(val name: String, persistencePath: PersistentStreamContainer, @volatile var config: QueueConfig,
                       timer: Timer, queueLookup: Option[(String => Option[PersistentQueue])]) {
 
@@ -49,10 +50,10 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
 
   private val log = Logger.get(getClass.getName)
 
-  private val isFanout = (name contains '+')
+  private val isFanout = (name contains '+')  // 包含+表示 是fanout队列
 
   // current size of all data in the queue:
-  private var queueSize: Long = 0
+  private var queueSize: Long = 0               //队列长度
 
   // timestamp of the last item read from the queue:
   private var _currentAge: Time = Time.epoch
@@ -63,14 +64,14 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
   def statNamed(statName: String) = "q/" + name + "/" + statName
 
   // # of items EVER added to the queue:
-  val putItems = new AtomicLong(0)
+  val putItems = new AtomicLong(0)              // 加入队列的日志记录数
   Stats.removeCounter(statNamed("total_items"))
   Stats.makeCounter(statNamed("total_items"), putItems)
   Stats.removeCounter(statNamed("put_items"))
   Stats.makeCounter(statNamed("put_items"), putItems)
 
   // # of bytes EVER added to the queue:
-  val putBytes = new AtomicLong(0)
+  val putBytes = new AtomicLong(0)             // 加入的字节数；
   Stats.removeCounter(statNamed("put_bytes"))
   Stats.makeCounter(statNamed("put_bytes"), putBytes)
 
@@ -123,19 +124,20 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
   private var closed = false
   private var paused = false
 
+  // 持久化日志文件
   private var journal =
     new Journal(persistencePath, name, config.syncJournal)
 
   private val waiters = new DeadlineWaitQueue(timer)
 
-  // track tentative removals
+  // track tentative removals  // 事务ID，跟踪试探性删除
   private var xidCounter: Int = 0
-  private val openTransactions = new mutable.HashMap[Int, QItem]
+  private val openTransactions = new mutable.HashMap[Int, QItem]  // 没完成的事务队列，读取了消息，但还没确认的记录
 
   // We use java LinkedHashMap rather than the scala impl because of VM-406.
   // A bug in LinkedHashMap causes linked entries to pile up in old gen under load.
   // The bug has been fixed in the twitter jdk but not yet in scala. 
-  private val transactionExpiryList = new java.util.LinkedHashMap[Int, Time]
+  private val transactionExpiryList = new java.util.LinkedHashMap[Int, Time]  // 没确认的记录的超时列表
 
   private def openTransactionIds = openTransactions.keys.toSeq.sorted.reverse
   def openTransactionCount = synchronized { openTransactions.size }
@@ -205,7 +207,7 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
   }
 
   // see KestrelHandler
-  metric(statNamed("set_latency_usec")) 
+  metric(statNamed("set_latency_usec"))
   metric(statNamed("get_timeout_msec"))
   metric(statNamed("delivery_latency_msec"))
   metric(statNamed("get_hit_latency_usec"))
@@ -213,7 +215,7 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
 
   // readbehind
   val fillReadBehindMetric = metric(statNamed("fill_readbehind_usec"))
-  
+
   // internal datastructure metrics
   val txMapSizeMetric = metric(statNamed("tx_map_size"))
   val txExpireListSizeMetric = metric(statNamed("tx_expire_list_size"))
@@ -221,7 +223,7 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
 
   // request size
   val requestSizeMetric = metric(statNamed("request_size"))
-  
+
   private final def adjustExpiry(startingTime: Time, expiry: Option[Time]): Option[Time] = {
     if (config.maxAge.isDefined) {
       val maxExpiry = startingTime + config.maxAge.get
@@ -291,11 +293,15 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
     if (!config.disableAggressiveRewrites) {
       if (journal.size >= config.defaultJournalSize.inBytes && queueLength == 0) {
         log.info("Rewriting journal file for '%s' (qsize=0)", name)
+        // journal 文件大于 最大准充的文件大小，并且 队列的长度（内存+journal)中的记录=0
+        // 将创建一个新的日志文件并删除该时间点之前的文件。
         rewriteJournal()
       } else if (allowRewrites &&
         journal.size + journal.archivedSize > config.maxJournalSize.inBytes &&
         queueSize < config.maxMemorySize.inBytes) {
         log.info("Rewriting journal file for '%s' (qsize=%d)", name, queueSize)
+        // 当前的日志文件大小加上archivedSize文件大小大于maxJournalSize，
+        // 并且queue中数据的大小小于maxMemorySize时，将创建一个新的日志文件并删除该时间点之前的文件。
         rewriteJournal()
         config.minJournalCompactDelay.foreach { delay =>
           allowRewrites = false
@@ -306,7 +312,7 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
       } else if (journal.size > config.maxMemorySize.inBytes) {
         log.info("Rotating journal file for '%s' (qsize=%d)", name, queueSize)
         val setCheckpoint = (journal.size + journal.archivedSize > config.maxJournalSize.inBytes)
-        rotateJournal(setCheckpoint)
+        rotateJournal(setCheckpoint)  // 当日志文件的大小大于maxMemorySize，将创建新的日志文件，之后达到的消息将存入新的文件。
       }
     } else {
       if (allowRewrites &&
@@ -361,13 +367,14 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
   }
 
   /**
+    * 生产者写入日志的入口
    * Add a value to the end of the in memory queue, and ignore the journal write future.
    */
   def add(value: Array[Byte], expiry: Option[Time], xid: Option[Int], addTime: Time): Boolean = {
     addDurable(value, expiry, xid, addTime) match {
       case Some(f) => true
       case None => false
-    } 
+    }
   }
 
   def add(value: Array[Byte]): Boolean = add(value, None, None, Time.now)
@@ -377,9 +384,9 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
   def continue(xid: Int, value: Array[Byte], expiry: Option[Time]): Boolean = add(value, expiry, Some(xid), Time.now)
 
   /**
-   * Add a value to the end of the queue, transactionally. If the result is defined, the item has been added to 
-   * the in memory queue and the future will be completed when the write is persisted. If the result is not defined 
-   * enqueue to in memory queue failed and journal write was not attempted. 
+   * Add a value to the end of the queue, transactionally. If the result is defined, the item has been added to
+   * the in memory queue and the future will be completed when the write is persisted. If the result is not defined
+   * enqueue to in memory queue failed and journal write was not attempted.
    */
   def addDurable(value: Array[Byte], expiry: Option[Time], xid: Option[Int], addTime: Time): Option[Future[Unit]] = {
     requestSizeMetric.add(value.size)
@@ -407,7 +414,9 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
     }
     val futureWrite = synchronized {
       if (closed || value.size > config.maxItemSize.inBytes) return None
-      if (config.fanoutOnly && !isFanout) return Some(Future.Done)
+      if (config.fanoutOnly && !isFanout) return Some(Future.Done) // 配置是只支持fanout，而队列不是fanout队列，直接返回
+      // 队列长度超出配置大小
+      // 如果没配置丢弃老的记录，直接返回。配置了，就已经将老的记录出列。
       while (queueLength >= config.maxItems || queueSize >= config.maxSize.inBytes) {
         if (!config.discardOldWhenFull) return None
         _remove(false, None)
@@ -415,6 +424,7 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
         if (config.keepJournal) journal.remove()
         fillReadBehind()
       }
+      // 有空间可用，加入队列
       val item = QItem(addTime, adjustExpiry(Time.now, expiry), value, 0)
       if (config.keepJournal) {
         checkRotateJournal()
@@ -423,6 +433,8 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
           journal.startReadBehind()
         }
       }
+
+      // 如果有事务id写入，将事务开放与超时队列中的记录都移除
       if (xid != None) {
         openTransactions.remove(xid.get) map { item =>
           config.openTransactionTimeout.map { timeout =>
@@ -449,10 +461,10 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
 
   /**
    * Allows us to get more detail about the state of internal datastructures efficiently.
-   * We don't care what percentiles or counts mean here, we just want to keep track of how 
+   * We don't care what percentiles or counts mean here, we just want to keep track of how
    * these data structures look most of the time.
    */
-  private[this] def addInternalsMetrics() {  
+  private[this] def addInternalsMetrics() {
     txMapSizeMetric.add(openTransactions.size)
     txExpireListSizeMetric.add(transactionExpiryList.size)
     queueSizeMetric.add(queue.size)
@@ -472,6 +484,7 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
   }
 
   /**
+    * 消费日志的入口
    * Remove and return an item from the queue, if there is one.
    *
    * @param transaction true if this should be considered the first part
@@ -504,11 +517,14 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
         // We time out the oldest read if any, this is done before the remove so that
         // the same checks that are used for live items (expiration etc.) can be applied
         // before redelivery
+        // 消费时，先去超时列表中查是否有末完成事务的记录，如果存在需要超时的记录，将超时记录写回到队列的第一次记录（超时回滚）。
+        // 下面再消费时，会先消费刚才超的日志。
         timeOutOldestOpenRead()
         val itemOption = _remove(transaction, None)
 
         // Track the item in the transaction expiry list if the queue has an
         // open transaction timeout
+        // 如果有事务，加个事务超时列表中。timeOutOldestOpenRead处理超时后将日志写回日志队列
         if (transaction) {
           config.openTransactionTimeout.map { timeout =>
             itemOption map { item =>
@@ -518,6 +534,7 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
         }
 
         if (config.keepJournal && itemOption.isDefined) {
+          // 消费成功，从journal中删除，从journal文件中加载记录到内存，为下面的消费做准信
           if (transaction) journal.removeTentative(itemOption.get.xid) else journal.remove()
           fillReadBehind()
           checkRotateJournal()
@@ -689,6 +706,9 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
     }
   }
 
+  /**
+    * 启动queue,重放日志
+    */
   def setup() {
     synchronized {
       queueSize = 0
@@ -749,6 +769,12 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
     xidCounter
   }
 
+  /**
+    * 当配置了写journal日志
+    * 内存中queue的数据 小于 最大配置的字节数
+    *
+    * 就要将journal文件中的日志 加载到内存队列中。
+    */
   private final def fillReadBehind() {
     val elapsed = Stopwatch.start()
 
@@ -837,6 +863,7 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
 
   private def _add(item: QItem) {
     discardExpired()
+    // 如果队列没落后（日志从journal中加载了），先入内存队列
     if (!journal.inReadBehind) {
       queue.add(item)
       _memoryBytes += item.data.length
@@ -862,11 +889,12 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
     queueSize -= len
     _memoryBytes -= len
     queueLength -= 1
+    // 如已经从journal中重放了，消费后就要重新日志到内存队列
     if (journal.isReplaying) {
       fillReadBehind()
     }
     _currentAge = item.addTime
-    if (transaction) {
+    if (transaction) { // 如果读取日志时有事务处理，先将日志放入开放的事务列表中
       item.xid = xid.getOrElse { nextXid() }
       openTransactions(item.xid) = item
     }
@@ -912,6 +940,11 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
     itemsToRemove.size
   }
 
+  /**
+    * 回滚事务
+    * @param xid  开放的事务ID
+    * @return
+    */
   private def _unremove(xid: Int) = {
     openTransactions.remove(xid) map { item =>
       queueLength += 1
@@ -929,6 +962,7 @@ class PersistentQueue(val name: String, persistencePath: PersistentStreamContain
         None
       }
     } map { txEntry =>
+      //超时时间小于当前时间
       if (txEntry.getValue < Time.now) {
         unremove(txEntry.getKey)
       }

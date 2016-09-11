@@ -24,6 +24,7 @@ import com.twitter.logging.Logger
 import com.twitter.util.Duration
 
 /**
+  * 合并多个journal文件成一个文件，文件包含当前队列的内容。
  * Pack one or more journal files into a single new file that only consists of the queue's current
  * contents, as of the end of the last journal file processed.
  */

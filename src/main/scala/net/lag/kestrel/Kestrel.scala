@@ -153,6 +153,8 @@ class Kestrel(defaultQueueConfig: QueueConfig, builders: List[QueueBuilder], ali
             log.warning("Rejected journal fsync")
           }
         })
+
+    // packer线程
     Journal.packer.start()
 
     try {
@@ -163,7 +165,9 @@ class Kestrel(defaultQueueConfig: QueueConfig, builders: List[QueueBuilder], ali
       val streamContainer = beFactory.createStreamContainer()
       val statusStore = beFactory.createStatusStore()
 
+      //队列集
       queueCollection = new QueueCollection(streamContainer, timer, defaultQueueConfig, builders, aliases)
+      // 从日志文件中加载重放
       queueCollection.loadQueues()
 
       Stats.addGauge("items") { queueCollection.currentItems.toDouble }
@@ -197,6 +201,7 @@ class Kestrel(defaultQueueConfig: QueueConfig, builders: List[QueueBuilder], ali
     val memcachePipelineFactoryCodec = finagledCodec[MemcacheRequest, MemcacheResponse] {
       MemcacheCodec.asciiCodec(bytesRead, bytesWritten)
     }
+    // 处理memcache协议
     memcacheService = memcacheListenPort.map { port =>
       startFinagleServer("kestrel-memcache", port, memcachePipelineFactoryCodec) { connection =>
         new MemcacheHandler(connection, queueCollection, maxOpenTransactions, Some(serverStatus))

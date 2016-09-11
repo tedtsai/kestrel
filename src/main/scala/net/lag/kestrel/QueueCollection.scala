@@ -32,6 +32,10 @@ object QueueCollection {
   val unknown = () => "<unknown>"
 }
 
+
+/**
+  * 服务器上队列集合
+  */
 class QueueCollection(var storageContainer:PersistentStreamContainer, timer: Timer,
                       @volatile private var defaultQueueConfig: QueueConfig,
                       @volatile var queueBuilders: List[QueueBuilder],
@@ -40,6 +44,7 @@ class QueueCollection(var storageContainer:PersistentStreamContainer, timer: Tim
   type SessionDescription = Option[() => String]
 
   private val log = Logger.get(getClass.getName)
+  // 队列名-> queue的影射关系
   private val queues = new mutable.HashMap[String, PersistentQueue]
   private val fanout_queues = new mutable.HashMap[String, mutable.HashSet[String]]
   private val aliases = new mutable.HashMap[String, AliasedQueue]
@@ -75,6 +80,7 @@ class QueueCollection(var storageContainer:PersistentStreamContainer, timer: Tim
 
   private def buildQueue(name: String, masterName: Option[String], path: PersistentStreamContainer,
                          sessionDescription: SessionDescription) = {
+    // 队列名不能包含 . / ~
     if ((name contains ".") || (name contains "/") || (name contains "~")) {
       throw new Exception("Queue name contains illegal characters (one of: ~ . /).")
     }
@@ -164,6 +170,7 @@ class QueueCollection(var storageContainer:PersistentStreamContainer, timer: Tim
       if (shuttingDown) {
         None
       } else if (create) {
+        //不存大，创建实例
         queues.get(name) orElse {
           // only happens when creating a queue for the first time.
           val q = if (name contains '+') {
@@ -175,7 +182,7 @@ class QueueCollection(var storageContainer:PersistentStreamContainer, timer: Tim
           } else {
             buildQueue(name, None, storageContainer, sessionDescription)
           }
-          q.setup
+          q.setup // 重放日志
           queues(name) = q
           Some(q)
         }

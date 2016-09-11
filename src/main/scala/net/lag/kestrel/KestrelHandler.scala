@@ -17,53 +17,73 @@
 
 package net.lag.kestrel
 
-import com.twitter.logging.{Level, Logger}
-import com.twitter.ostrich.admin.{BackgroundProcess, ServiceTracker}
-import com.twitter.ostrich.stats.Stats
-import com.twitter.util._
 import java.util.concurrent.atomic.AtomicBoolean
-import scala.collection.mutable
-import scala.collection.Set
+
+import scala.collection.{Set, mutable}
 
 class TooManyOpenReadsException extends Exception("Too many open reads.")
+
 object TooManyOpenReadsException extends TooManyOpenReadsException
 
 class ServerStatusNotConfiguredException
-extends Exception("Server status not configured.")
+  extends Exception("Server status not configured.")
 
 class AvailabilityException(op: String, serverScope: Boolean)
-extends Exception(op) {
+  extends Exception(op) {
   def this(op: String) {
     this("Server not available for operation %s".format(op), true)
   }
 
-  def this(op: String, queue: String, reason: String)  = {
+  def this(op: String, queue: String, reason: String) = {
     this("The operation %s is disallowed on queue %s. %s".format(op, queue, reason), false)
   }
 }
 
 trait SimplePendingReads {
   def queues: QueueCollection
+
   protected def log: Logger
+
   def sessionId: Int
+
   def clientDescription: () => String
 
   object pendingReads {
     private val reads = new mutable.HashMap[String, ItemIdList] {
       override def default(key: String) = {
         val rv = new ItemIdList()
-        this(key) = rv
+        this (key) = rv
         rv
       }
     }
 
-    def pop(name: String): Option[Int] = synchronized { reads(name).pop() }
-    def popN(name: String, count: Int): Seq[Int] = synchronized { reads(name).pop(count) }
-    def add(name: String, xid: Int) = synchronized { reads(name) add xid }
-    def size(name: String): Int = synchronized { reads(name).size }
-    def popAll(name: String): Seq[Int] = synchronized { reads(name).popAll() }
-    def peek(name: String): Seq[Int] = synchronized { reads(name).peek() }
-    def remove(name: String, ids: Set[Int]): Set[Int] = synchronized { reads(name).remove(ids) }
+    def pop(name: String): Option[Int] = synchronized {
+      reads(name).pop()
+    }
+
+    def popN(name: String, count: Int): Seq[Int] = synchronized {
+      reads(name).pop(count)
+    }
+
+    def add(name: String, xid: Int) = synchronized {
+      reads(name) add xid
+    }
+
+    def size(name: String): Int = synchronized {
+      reads(name).size
+    }
+
+    def popAll(name: String): Seq[Int] = synchronized {
+      reads(name).popAll()
+    }
+
+    def peek(name: String): Seq[Int] = synchronized {
+      reads(name).peek()
+    }
+
+    def remove(name: String, ids: Set[Int]): Set[Int] = synchronized {
+      reads(name).remove(ids)
+    }
 
     def cancelAll(): Int = {
       var count = 0
@@ -85,7 +105,7 @@ trait SimplePendingReads {
     pendingReads.pop(key) match {
       case None =>
         log.warning("Attempt to abort a non-existent read on '%s' (sid %d, %s)",
-                    key, sessionId, clientDescription)
+          key, sessionId, clientDescription)
         false
       case Some(xid) =>
         log.debug("abort -> q=%s", key)
@@ -119,23 +139,26 @@ trait SimplePendingReads {
   }
 
   def countPendingReads(key: String) = pendingReads.size(key)
+
   def addPendingRead(key: String, xid: Int): Option[Long] = {
     pendingReads.add(key, xid)
     None
   }
+
   def cancelAllPendingReads() = pendingReads.cancelAll()
 }
 
 /**
- * Common implementations of kestrel commands that don't depend on which protocol you're using.
- */
+  * kestrel 支持的命令接口，IO处理后，会转入到此handler，处理 消费或生产日志等命令
+  * Common implementations of kestrel commands that don't depend on which protocol you're using.
+  */
 abstract class KestrelHandler(
-  val queues: QueueCollection,
-  val maxOpenReads: Int,
-  val clientDescription: () => String,
-  val sessionId: Int,
-  val serverStatus: Option[ServerStatus]
-) {
+                               val queues: QueueCollection,
+                               val maxOpenReads: Int,
+                               val clientDescription: () => String,
+                               val sessionId: Int,
+                               val serverStatus: Option[ServerStatus]
+                             ) {
   protected val log = Logger.get(getClass.getName)
 
   val finished = new AtomicBoolean(false)
@@ -176,7 +199,9 @@ abstract class KestrelHandler(
   }
 
   protected def countPendingReads(key: String): Int
+
   protected def addPendingRead(key: String, xid: Int): Option[Long]
+
   protected def cancelAllPendingReads(): Int
 
   protected def abortWaiters() {
@@ -227,7 +252,7 @@ abstract class KestrelHandler(
           case None =>
             removeWaiter(future)
             f(None, None)
-          case x @ Some(item) =>
+          case x@Some(item) =>
             removeWaiter(future)
             val xidContext = if (opening) {
               val addedValue = addPendingRead(key, item.xid)
@@ -249,12 +274,20 @@ abstract class KestrelHandler(
     monitorLoop(maxItems)
   }
 
+  /**
+    * 读取消费
+    * @param key
+    * @param timeout
+    * @param opening
+    * @param peeking
+    * @return
+    */
   def getItem(key: String, timeout: Option[Time], opening: Boolean, peeking: Boolean): Future[Option[QItem]] = {
     checkBlockReads("getItem", key)
 
     if (opening && countPendingReads(key) >= maxOpenReads) {
       log.warning("Attempt to open too many reads on '%s' (sid %d, %s)", key, sessionId,
-                  sessionDescription)
+        sessionDescription)
       throw TooManyOpenReadsException
     }
 
@@ -292,6 +325,15 @@ abstract class KestrelHandler(
     }
   }
 
+  /**
+    * 生产者写入日志
+    *
+    * @param key
+    * @param flags
+    * @param expiry
+    * @param data
+    * @return
+    */
   def setItem(key: String, flags: Int, expiry: Option[Time], data: Array[Byte]) = {
     checkBlockWrites("setItem", key)
     log.debug("set -> q=%s flags=%d expiry=%s size=%d", key, flags, expiry, data.length)
@@ -334,7 +376,9 @@ abstract class KestrelHandler(
     }
   }
 
-  def safeCheckBlockReads: Boolean = serverStatus map { _.blockReads } getOrElse(false)
+  def safeCheckBlockReads: Boolean = serverStatus map {
+    _.blockReads
+  } getOrElse (false)
 
   def checkBlockReads(op: String, key: String) {
     if (refuseReads || safeCheckBlockReads) {
@@ -344,7 +388,9 @@ abstract class KestrelHandler(
   }
 
   def checkBlockWrites(op: String, key: String) {
-    if (refuseWrites || (serverStatus map { _.blockWrites } getOrElse(false))) {
+    if (refuseWrites || (serverStatus map {
+      _.blockWrites
+    } getOrElse (false))) {
       log.debug("Blocking %s on '%s' (%s)", op, key, sessionDescription)
       throw new AvailabilityException(op)
     }

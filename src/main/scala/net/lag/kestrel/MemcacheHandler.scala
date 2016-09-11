@@ -77,6 +77,11 @@ class MemcacheHandler(
     }
   }
 
+  /**
+    * 解释并处理memcache协议
+    * @param request
+    * @return
+    */
   private def handle(request: MemcacheRequest): Future[MemcacheResponse] = {
     request.line(0) match {
       case "get" | "gets" =>
